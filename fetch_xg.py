@@ -1,4 +1,4 @@
-# fetch_xg.py v3
+# fetch_xg.py v4
 # Fetches:
 #   - PL 2025/26 match-by-match xG per team (all 20 teams)
 #   - Player stats: xG, npxG, xA, shots, key passes — last 6 matches + last match
@@ -53,12 +53,11 @@ async def fetch_team_xg(understat):
 
 async def fetch_player_stats(understat, team_xg_data):
     """
-    Fetch all PL players then get per-match logs via get_player_matches.
-    Slice the last 6 matches and last 1 match from each player's sorted log.
+    For each team, fetch player shots for the season.
+    Group shots by (player, match_id) to get per-match xG totals.
+    Then slice last 6 matches and last 1 match per player.
     """
-    print("\nFetching player season stats...")
-    all_players = await understat.get_league_players("epl", SEASON)
-    print(f"  {len(all_players)} players found")
+    print("\nFetching player stats per team...")
 
     def safe_float(v):
         try: return float(v or 0)
@@ -68,53 +67,14 @@ async def fetch_player_stats(understat, team_xg_data):
         try: return int(v or 0)
         except: return 0
 
-    def sum_stat(logs, stat):
-        return round(sum(safe_float(m.get(stat)) for m in logs), 2)
-
-    player_rows = []
-
-    for i, p in enumerate(all_players):
-        pid   = p["id"]
-        pname = p["player_name"]
-        team  = p["team_title"]
-
-        if team not in PL_TEAMS:
-            continue
-
-        try:
-            # get_player_matches returns ALL matches for this player across all seasons/leagues
-            # We pass season filter to narrow it down
-            logs = await understat.get_player_matches(pid, {"season": SEASON})
-        except Exception as e:
-            print(f"  ⚠ Could not fetch {pname}: {e}")
-            continue
-
-        # Sort by date ascending so last entries = most recent
-        logs.sort(key=lambda m: m.get("date",""))
-
-        # Debug first 2 players AND anyone named Malen
-        if i < 2 or "malen" in pname.lower():
-            print(f"  {pname}: {len(logs)} total logs")
-            if logs:
-                print(f"    ALL dates: {[m.get('date','?')[:10] for m in logs]}")
-                print(f"    league values: {list(set(str(m.get('league') or m.get('h_a') or '?') for m in logs))}")
-                print(f"    season values: {list(set(str(m.get('season','?')) for m in logs))}")
-
-        # Filter to 2025/26 season only (on or after 2025-08-01)
-        season_logs = [m for m in logs if (m.get("date") or "")[:7] >= "2025-08"]
-
-        if i < 2 or "malen" in pname.lower():
-            print(f"    → after filter: {len(season_logs)} logs, dates: {[m.get('date','?')[:10] for m in season_logs]}")
-
-        # Slice last 6 and last 1 from THIS SEASON only
-        last6 = season_logs[-6:] if len(season_logs) >= 6 else season_logs
-        last1 = season_logs[-1:] if season_logs else []
-
-        player_rows.append({
-            "id":   pid,
-            "name": pname,
-            "team": team,
-            "season": {
+    # Get season totals from league players endpoint (always accurate)
+    all_players = await understat.get_league_players("epl", SEASON)
+    season_totals = {}
+    for p in all_players:
+        if p["team_title"] in PL_TEAMS:
+            season_totals[str(p["id"])] = {
+                "name":       p["player_name"],
+                "team":       p["team_title"],
                 "xG":         round(safe_float(p.get("xG")),   2),
                 "npxG":       round(safe_float(p.get("npxG")),  2),
                 "xA":         round(safe_float(p.get("xA")),    2),
@@ -123,39 +83,141 @@ async def fetch_player_stats(understat, team_xg_data):
                 "goals":      safe_int(p.get("goals")),
                 "assists":    safe_int(p.get("assists")),
                 "games":      safe_int(p.get("games")),
+            }
+    print(f"  {len(season_totals)} PL players with season totals")
+
+    # For each team, get all shots for the season
+    # Each shot has: player_id, match_id, date, xG, result (Goal/Miss etc), situation
+    # We group by (player_id, match_id) to get per-match aggregates
+
+    # player_matches[player_id] = list of {date, match_id, xG, npxG, xA, shots, key_passes, goals, assists}
+    player_matches = {}
+
+    for team_name in PL_TEAMS:
+        print(f"  Fetching shots for {team_name}...")
+        try:
+            shots = await understat.get_team_shots(team_name, SEASON)
+        except Exception as e:
+            print(f"    ⚠ Failed: {e}")
+            continue
+
+        print(f"    → {len(shots)} shots")
+        if not shots:
+            continue
+
+        # Debug: show keys from first shot
+        if team_name == "Arsenal":
+            print(f"    Shot keys: {list(shots[0].keys())}")
+            print(f"    Sample shot: {shots[0]}")
+
+        # Group shots by player+match
+        # shot fields include: player_id, match_id, date, xG, npxG (may not exist), result, situation
+        match_groups = {}  # key: (player_id, match_id)
+        for s in shots:
+            pid = str(s.get("player_id", ""))
+            mid = str(s.get("match_id",  ""))
+            if not pid or not mid:
+                continue
+            key = (pid, mid)
+            if key not in match_groups:
+                match_groups[key] = {
+                    "date":       (s.get("date") or "")[:10],
+                    "xG":         0.0,
+                    "npxG":       0.0,
+                    "shots":      0,
+                    "goals":      0,
+                }
+            g = match_groups[key]
+            xg_val = safe_float(s.get("xG"))
+            g["xG"]    = round(g["xG"] + xg_val, 4)
+            # npxG = xG excluding penalties
+            if s.get("situation") != "Penalty":
+                g["npxG"] = round(g["npxG"] + xg_val, 4)
+            g["shots"] += 1
+            if s.get("result") == "Goal":
+                g["goals"] += 1
+
+        # Accumulate into player_matches
+        for (pid, mid), data in match_groups.items():
+            if pid not in player_matches:
+                player_matches[pid] = []
+            player_matches[pid].append(data)
+
+    # Now fetch key passes (assists-level) separately via team results
+    # Unfortunately Understat shot data doesn't include xA per shot easily,
+    # so we use the season total xA from get_league_players (already in season_totals)
+    # and approximate last6 xA by ratio: last6_shots/season_shots * season_xA
+    # This is an approximation — noted in the UI
+
+    print(f"\n  Building player records...")
+    player_rows = []
+
+    for pid, s in season_totals.items():
+        matches_for_player = player_matches.get(pid, [])
+
+        # Sort by date
+        matches_for_player.sort(key=lambda m: m["date"])
+
+        # Filter to this season just in case
+        matches_for_player = [m for m in matches_for_player if m["date"] >= "2025-08-01"]
+
+        last6 = matches_for_player[-6:] if len(matches_for_player) >= 6 else matches_for_player
+        last1 = matches_for_player[-1:] if matches_for_player else []
+
+        def sum_m(lst, k):
+            return round(sum(safe_float(m.get(k, 0)) for m in lst), 2)
+
+        # Approximate xA for last6/last1 by ratio
+        season_xA    = s["xA"]
+        season_shots = s["shots"] or 1
+        l6_shots     = sum(safe_int(m.get("shots")) for m in last6)
+        l1_shots     = sum(safe_int(m.get("shots")) for m in last1)
+        l6_xA        = round(season_xA * (l6_shots / season_shots), 2)
+        l1_xA        = round(season_xA * (l1_shots / season_shots), 2)
+
+        player_rows.append({
+            "id":   pid,
+            "name": s["name"],
+            "team": s["team"],
+            "season": {
+                "xG":         s["xG"],
+                "npxG":       s["npxG"],
+                "xA":         s["xA"],
+                "shots":      s["shots"],
+                "key_passes": s["key_passes"],
+                "goals":      s["goals"],
+                "assists":    s["assists"],
+                "games":      s["games"],
             },
             "last6": {
-                "xG":         sum_stat(last6, "xG"),
-                "npxG":       sum_stat(last6, "npxG"),
-                "xA":         sum_stat(last6, "xA"),
-                "shots":      sum(safe_int(m.get("shots"))      for m in last6),
-                "key_passes": sum(safe_int(m.get("key_passes")) for m in last6),
-                "goals":      sum(safe_int(m.get("goals"))      for m in last6),
-                "assists":    sum(safe_int(m.get("assists"))     for m in last6),
+                "xG":         sum_m(last6, "xG"),
+                "npxG":       sum_m(last6, "npxG"),
+                "xA":         l6_xA,
+                "shots":      sum(safe_int(m.get("shots")) for m in last6),
+                "key_passes": 0,  # not available at shot level
+                "goals":      sum(safe_int(m.get("goals")) for m in last6),
+                "assists":    0,
                 "games":      len(last6),
             },
             "lastGW": {
-                "xG":         sum_stat(last1, "xG"),
-                "npxG":       sum_stat(last1, "npxG"),
-                "xA":         sum_stat(last1, "xA"),
-                "shots":      sum(safe_int(m.get("shots"))      for m in last1),
-                "key_passes": sum(safe_int(m.get("key_passes")) for m in last1),
-                "goals":      sum(safe_int(m.get("goals"))      for m in last1),
-                "assists":    sum(safe_int(m.get("assists"))     for m in last1),
+                "xG":         sum_m(last1, "xG"),
+                "npxG":       sum_m(last1, "npxG"),
+                "xA":         l1_xA,
+                "shots":      sum(safe_int(m.get("shots")) for m in last1),
+                "key_passes": 0,
+                "goals":      sum(safe_int(m.get("goals")) for m in last1),
+                "assists":    0,
                 "games":      len(last1),
             },
         })
 
-        if (i + 1) % 50 == 0:
-            print(f"  Processed {i+1} players...")
-
-    # Show top 5 by last 6 xG to verify
+    # Show top 5 by last 6 xG
     top5 = sorted(player_rows, key=lambda x: x["last6"]["xG"], reverse=True)[:5]
     print("\n  Top 5 by last 6 xG:")
     for p in top5:
-        print(f"    {p['name']} ({p['team']}): last6 xG={p['last6']['xG']} games={p['last6']['games']}, lastGW xG={p['lastGW']['xG']}")
+        print(f"    {p['name']} ({p['team']}): xG={p['last6']['xG']} shots={p['last6']['shots']} games={p['last6']['games']}")
 
-    print(f"\n  Done — {len(player_rows)} PL players processed")
+    print(f"\n  Done — {len(player_rows)} players")
     return player_rows
 
 
@@ -191,7 +253,7 @@ async def upload_to_gist(data: dict):
 
 
 async def main():
-    print(f"=== PL {SEASON}/{int(SEASON)+1} xG Fetcher v2 ===\n")
+    print(f"=== PL {SEASON}/{int(SEASON)+1} xG Fetcher v4 ===\n")
     async with aiohttp.ClientSession() as session:
         understat = Understat(session)
         team_xg = await fetch_team_xg(understat)
