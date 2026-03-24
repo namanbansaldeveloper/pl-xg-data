@@ -103,27 +103,34 @@ async def fetch_player_stats(understat, team_xg_data):
             print(f"  ⚠ Could not fetch logs for {pname}: {e}")
             continue
 
-        # Filter to EPL only
-        epl_logs = [m for m in logs if m.get("league") == "EPL"]
+        def log_date(m):
+            return (m.get("date") or "")[:10]
 
         def sum_stat(log_list, stat):
             return round(sum(float(m.get(stat, 0) or 0) for m in log_list), 2)
 
-        # Use date string prefix for matching (handles timezone differences)
-        # Player log dates look like "2025-11-02 15:00:00" — we take first 10 chars
-        def log_date(m):
-            return (m.get("date") or "")[:10]
+        # Debug: print raw league values for first 3 players so we can see exact string
+        if i < 3:
+            league_vals = list(set(m.get("league","?") for m in logs))
+            sample_dates = [log_date(m) for m in logs[-3:]]
+            print(f"  {pname}: {len(logs)} total logs | leagues: {league_vals} | sample dates: {sample_dates}")
 
-        # Last 6 GWs: any match on or after the earliest of the last 6 GW dates
+        # Filter to PL only — Understat may use "EPL" or "Premier League"
+        epl_logs = [m for m in logs if m.get("league","") in ("EPL", "Premier League", "epl")]
+
+        # If still empty, fall back to all logs (handles unexpected league string)
+        if not epl_logs and logs:
+            if i < 3:
+                print(f"    ⚠ league filter matched nothing — using all {len(logs)} logs")
+            epl_logs = logs
+
+        # Last 6 GWs: matches within the last 6 GW date range
         l6 = [m for m in epl_logs if last_6_cutoff <= log_date(m) <= last_gw_date]
-        # Last GW: any match on the last GW date
+        # Last GW: matches on the exact last GW date
         l1 = [m for m in epl_logs if log_date(m) == last_gw_date]
 
-        # Debug first few players so we can verify in Actions log
         if i < 3:
-            sample_dates = [log_date(m) for m in epl_logs[-3:]]
-            print(f"  {pname}: {len(epl_logs)} EPL logs | sample dates: {sample_dates} | l6={len(l6)} l1={len(l1)}")
-            print(f"    → comparing against last_6_cutoff={last_6_cutoff}, last_gw_date={last_gw_date}")
+            print(f"    → epl_logs={len(epl_logs)}, l6={len(l6)}, l1={len(l1)}")
 
         player_rows.append({            "id":     pid,
             "name":   pname,
