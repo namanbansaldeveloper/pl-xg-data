@@ -21,8 +21,7 @@ async def fetch_team_xg(understat):
     all_data = {}
     for team in teams_data:
         name = team["title"]
-        if name not in PL_TEAMS:
-            continue
+        if name not in PL_TEAMS: continue
         matches = []
         for m in team["history"]:
             matches.append({
@@ -46,21 +45,18 @@ async def fetch_player_stats(understat):
 
     for i, p in enumerate(sorted_players[:150]):
         pid, pname, team = p["id"], p["player_name"], p["team_title"]
-        if team not in PL_TEAMS:
-            continue
+        if team not in PL_TEAMS: continue
 
         try:
             logs = await understat.get_player_matches(pid)
-        except Exception:
-            continue
+        except Exception: continue
 
         epl_logs = []
         for m in logs:
             m_date = m.get("date", "")
             is_current = "2025-" in m_date or "2026-" in m_date
             is_pl = m.get("h_team") in PL_TEAMS or m.get("a_team") in PL_TEAMS
-            if is_current and is_pl:
-                epl_logs.append(m)
+            if is_current and is_pl: epl_logs.append(m)
 
         epl_logs.sort(key=lambda x: x["date"], reverse=True)
         l1, l6 = epl_logs[:1], epl_logs[:6]
@@ -78,23 +74,18 @@ async def fetch_player_stats(understat):
                 "games": int(p.get("games", 0)),
             },
             "last6": {
-                "xG": s_st(l6, "xG"),
-                "xA": s_st(l6, "xA"),
+                "xG": s_st(l6, "xG"), "xA": s_st(l6, "xA"),
                 "goals": int(sum(int(m.get("goals", 0)) for m in l6)),
                 "games": len(l6),
             },
             "lastGW": {
-                "xG": s_st(l1, "xG"),
-                "xA": s_st(l1, "xA"),
+                "xG": s_st(l1, "xG"), "xA": s_st(l1, "xA"),
                 "goals": int(sum(int(m.get("goals", 0)) for m in l1)),
                 "date": l1[0]["date"] if l1 else "N/A"
             }
         })
-        if (i + 1) % 50 == 0:
-            print(f"  Processed {i+1} players...")
+        if (i + 1) % 50 == 0: print(f"  Processed {i+1} players...")
     return player_rows
 
-async def upload_to_gist(data: dict):
+async def upload_to_gist(data):
     g_id = os.environ["GIST_ID"]
-    g_tk = os.environ["GIST_TOKEN"]
-    ts = datetime.now(timezone.
