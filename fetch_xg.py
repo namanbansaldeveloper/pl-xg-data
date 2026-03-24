@@ -109,12 +109,14 @@ async def fetch_player_stats(understat, team_xg_data):
         last6_dates = [d for _, d in team_match_history[team][-6:]]
         print(f"  {team} last 6 dates: {last6_dates}")
 
-    # ── Step 4: fetch player data for all needed matches ──────────────────
+    # ── Step 4: fetch player data + shots for all needed matches ─────────
     match_player_data = {}  # match_id -> {player_id -> pdata}
+    match_npxg_data   = {}  # match_id -> {player_id -> npxG float}
 
     print(f"  Fetching player data for {len(all_needed_ids)} matches...")
     for i, mid in enumerate(all_needed_ids):
         try:
+            # Player stats (goals, shots, xA, key passes etc.)
             match_players = await understat.get_match_players(mid)
             match_player_data[mid] = {}
             for side in ("h", "a"):
@@ -122,6 +124,21 @@ async def fetch_player_stats(understat, team_xg_data):
                     pid = str(pdata.get("player_id", ""))
                     if pid:
                         match_player_data[mid][pid] = pdata
+
+            # Shot data to compute npxG (exclude penalties)
+            match_shots = await understat.get_match_shots(mid)
+            match_npxg_data[mid] = {}
+            for side in ("h", "a"):
+                for shot in match_shots.get(side, []):
+                    pid = str(shot.get("player_id", ""))
+                    if not pid:
+                        continue
+                    if shot.get("situation") == "Penalty":
+                        continue
+                    xg_val = safe_float(shot.get("xG"))
+                    match_npxg_data[mid][pid] = round(
+                        match_npxg_data[mid].get(pid, 0.0) + xg_val, 4
+                    )
         except Exception as e:
             print(f"    ⚠ match {mid} failed: {e}")
         if (i + 1) % 20 == 0:
@@ -142,7 +159,7 @@ async def fetch_player_stats(understat, team_xg_data):
             pdata = match_player_data.get(mid, {}).get(pid)
             if pdata:
                 result["xG"]         = round(result["xG"] + safe_float(pdata.get("xG")), 2)
-                result["npxG"]       = round(result["npxG"] + safe_float(pdata.get("xG")), 2)
+                result["npxG"]       = round(result["npxG"] + match_npxg_data.get(mid, {}).get(pid, safe_float(pdata.get("xG"))), 2)
                 result["xA"]         = round(result["xA"] + safe_float(pdata.get("xA")), 2)
                 result["shots"]      += safe_int(pdata.get("shots"))
                 result["key_passes"] += safe_int(pdata.get("key_passes"))
