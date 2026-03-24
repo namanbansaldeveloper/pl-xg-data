@@ -121,7 +121,9 @@ async def fetch_player_stats(understat, team_xg_data):
 
         # Debug first few players so we can verify in Actions log
         if i < 3:
-            print(f"  {pname}: {len(epl_logs)} EPL logs, l6={len(l6)}, l1={len(l1)}")
+            sample_dates = [log_date(m) for m in epl_logs[-3:]]
+            print(f"  {pname}: {len(epl_logs)} EPL logs | sample dates: {sample_dates} | l6={len(l6)} l1={len(l1)}")
+            print(f"    → comparing against last_6_cutoff={last_6_cutoff}, last_gw_date={last_gw_date}")
 
         player_rows.append({            "id":     pid,
             "name":   pname,
