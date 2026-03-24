@@ -27,6 +27,10 @@ jobs:
       - name: Install dependencies
         run: pip install understat aiohttp
 
+      # Player match log fetching can take ~2 min — default timeout is 6h so fine,
+      # but we set an explicit job timeout just in case
+    timeout-minutes: 15
+
       - name: Run fetch script
         env:
           GIST_ID:    ${{ secrets.GIST_ID }}
