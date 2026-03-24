@@ -65,7 +65,8 @@ async def fetch_player_stats(understat, team_xg_data):
     season_totals = {}
     for p in all_players:
         if p["team_title"] in PL_TEAMS:
-            season_totals[str(p["id"])] = {
+            pid = str(p["id"])
+            season_totals[pid] = {
                 "name":       p["player_name"],
                 "team":       p["team_title"],
                 "xG":         round(safe_float(p.get("xG")),   2),
@@ -78,6 +79,10 @@ async def fetch_player_stats(understat, team_xg_data):
                 "games":      safe_int(p.get("games")),
             }
     print(f"  {len(season_totals)} PL players with season totals")
+    # Debug: print a few IDs so we can compare with match player_id values
+    sample_ids = list(season_totals.items())[:3]
+    for pid, s in sample_ids:
+        print(f"  season_totals sample — id: {pid}, name: {s['name']}")
 
     # ── Step 2: get all league results to find match IDs + dates ──────────
     print("  Fetching all league results for match IDs...")
@@ -120,21 +125,11 @@ async def fetch_player_stats(understat, team_xg_data):
                 # Debug: print raw structure of first match only
                 if not debug_done:
                     debug_done = True
-                    print(f"\n  DEBUG match {mid} raw type: {type(match_players)}")
-                    if isinstance(match_players, dict):
-                        print(f"  DEBUG top-level keys: {list(match_players.keys())}")
-                        for side in list(match_players.keys())[:1]:
-                            side_data = match_players[side]
-                            print(f"  DEBUG side '{side}' type: {type(side_data)}")
-                            if isinstance(side_data, dict):
-                                first_pid = list(side_data.keys())[0] if side_data else None
-                                if first_pid:
-                                    print(f"  DEBUG first player id: {first_pid}")
-                                    print(f"  DEBUG first player data: {side_data[first_pid]}")
-                            elif isinstance(side_data, list) and side_data:
-                                print(f"  DEBUG first item: {side_data[0]}")
-                    elif isinstance(match_players, list) and match_players:
-                        print(f"  DEBUG first item: {match_players[0]}")
+                    print(f"\n  DEBUG match {mid} top-level keys: {list(match_players.keys())}")
+                    for side in list(match_players.keys())[:1]:
+                        side_data = match_players[side]
+                        for roster_id, pdata in list(side_data.items())[:3]:
+                            print(f"  DEBUG roster_key={roster_id}, player_id={pdata.get('player_id')}, name={pdata.get('player')}, xG={pdata.get('xG')}")
                     print()
                 # get_match_players returns {"h": {pid: {...}}, "a": {pid: {...}}}
                 for side in ("h", "a"):
