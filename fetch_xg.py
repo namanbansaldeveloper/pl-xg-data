@@ -24,8 +24,6 @@ PL_TEAMS = [
     "Wolverhampton Wanderers",
 ]
 
-PLAYER_STATS = ["xG", "npxG", "xA", "key_passes", "shots"]
-
 
 async def fetch_team_xg(understat):
     """Fetch match-by-match xG for all 20 PL teams."""
@@ -55,126 +53,111 @@ async def fetch_team_xg(understat):
 
 async def fetch_player_stats(understat, team_xg_data):
     """
-    Fetch all PL players, then for each player fetch their match logs
-    to compute last-6-GW and last-GW totals.
-
-    Understat's get_league_players gives season totals.
-    We then get per-match logs for each player to slice last 6 / last 1.
+    For each PL team, fetch players via get_team_players which returns
+    per-player season history with match-level xG data we can slice.
     """
-    print("\nFetching player season stats...")
-    players = await understat.get_league_players("epl", SEASON)
-    print(f"  {len(players)} players found")
+    print("\nFetching player stats per team...")
 
-    # Build a sorted list of all unique match dates across all teams
+    # Get sorted list of all unique match dates
     all_dates = sorted(set(
         m["date"]
         for matches in team_xg_data.values()
         for m in matches
     ))
 
-    # Last GW = most recent date
-    last_gw_date = all_dates[-1] if all_dates else None
-    # Last 6 GWs = last 6 unique dates
-    last_6_dates = set(all_dates[-6:]) if len(all_dates) >= 6 else set(all_dates)
-
-    # Also compute cutoff timestamps for fuzzy matching
-    # (player logs use full datetime strings, not just dates)
-    last_gw_cutoff = last_gw_date  # players within this date string
-    last_6_cutoff  = min(last_6_dates) if last_6_dates else last_gw_date
+    last_gw_date  = all_dates[-1] if all_dates else None
+    last_6_dates  = set(all_dates[-6:]) if len(all_dates) >= 6 else set(all_dates)
+    last_6_cutoff = min(last_6_dates) if last_6_dates else last_gw_date
 
     print(f"  Last GW date  : {last_gw_date}")
     print(f"  Last 6 cutoff : {last_6_cutoff} → {last_gw_date}")
 
-    print("\nFetching per-player match logs (this takes ~1-2 min)...")
-    player_rows = []
+    def log_date(m):
+        return (m.get("date") or "")[:10]
 
-    for i, p in enumerate(players):
-        pid   = p["id"]
-        pname = p["player_name"]
-        team  = p["team_title"]
+    def safe_float(v):
+        try: return float(v or 0)
+        except: return 0.0
 
-        # Only process PL teams
-        if team not in PL_TEAMS:
-            continue
+    def safe_int(v):
+        try: return int(v or 0)
+        except: return 0
 
+    # Accumulate stats across all teams keyed by player id
+    player_map = {}
+
+    for team_name in PL_TEAMS:
+        print(f"  Fetching players for {team_name}...")
         try:
-            logs = await understat.get_player_matches(pid, {"season": SEASON})
+            team_players = await understat.get_team_players(team_name, SEASON)
         except Exception as e:
-            print(f"  ⚠ Could not fetch logs for {pname}: {e}")
+            print(f"    ⚠ Failed: {e}")
             continue
 
-        def log_date(m):
-            return (m.get("date") or "")[:10]
+        print(f"    → {len(team_players)} players, first player keys: {list(team_players[0].keys()) if team_players else '[]'}")
 
-        def sum_stat(log_list, stat):
-            return round(sum(float(m.get(stat, 0) or 0) for m in log_list), 2)
+        for p in team_players:
+            pid   = str(p.get("id", ""))
+            pname = p.get("player_name") or p.get("name", "unknown")
+            matches = p.get("matches", p.get("history", []))
 
-        # Debug: print raw league values for first 3 players so we can see exact string
-        if i < 3:
-            league_vals = list(set(m.get("league","?") for m in logs))
-            sample_dates = [log_date(m) for m in logs[-3:]]
-            print(f"  {pname}: {len(logs)} total logs | leagues: {league_vals} | sample dates: {sample_dates}")
+            # Debug first player per team
+            if team_players.index(p) == 0:
+                print(f"    Sample player: {pname}, matches type: {type(matches)}, count: {len(matches) if isinstance(matches, list) else 'N/A'}")
+                if matches and isinstance(matches, list):
+                    print(f"    Sample match keys: {list(matches[0].keys())}")
+                    print(f"    Sample match dates: {[log_date(m) for m in matches[:3]]}")
 
-        # Filter to PL only — Understat may use "EPL" or "Premier League"
-        epl_logs = [m for m in logs if m.get("league","") in ("EPL", "Premier League", "epl")]
+            if pid not in player_map:
+                player_map[pid] = {
+                    "id":   pid,
+                    "name": pname,
+                    "team": team_name,
+                    "season": {
+                        "xG":         round(safe_float(p.get("xG")),   2),
+                        "npxG":       round(safe_float(p.get("npxG")),  2),
+                        "xA":         round(safe_float(p.get("xA")),    2),
+                        "shots":      safe_int(p.get("shots")),
+                        "key_passes": safe_int(p.get("key_passes")),
+                        "goals":      safe_int(p.get("goals")),
+                        "assists":    safe_int(p.get("assists")),
+                        "games":      safe_int(p.get("games")),
+                    },
+                    "last6":  {"xG":0.0,"npxG":0.0,"xA":0.0,"shots":0,"key_passes":0,"goals":0,"assists":0,"games":0},
+                    "lastGW": {"xG":0.0,"npxG":0.0,"xA":0.0,"shots":0,"key_passes":0,"goals":0,"assists":0,"games":0},
+                }
 
-        # If still empty, fall back to all logs (handles unexpected league string)
-        if not epl_logs and logs:
-            if i < 3:
-                print(f"    ⚠ league filter matched nothing — using all {len(logs)} logs")
-            epl_logs = logs
+            if isinstance(matches, list):
+                for m in matches:
+                    d = log_date(m)
+                    if not d:
+                        continue
+                    in_l6 = last_6_cutoff <= d <= last_gw_date
+                    in_l1 = d == last_gw_date
 
-        # Last 6 GWs: matches within the last 6 GW date range
-        l6 = [m for m in epl_logs if last_6_cutoff <= log_date(m) <= last_gw_date]
-        # Last GW: matches on the exact last GW date
-        l1 = [m for m in epl_logs if log_date(m) == last_gw_date]
+                    for bucket, include in [("last6", in_l6), ("lastGW", in_l1)]:
+                        if not include:
+                            continue
+                        r = player_map[pid][bucket]
+                        r["xG"]         = round(r["xG"]   + safe_float(m.get("xG")),   2)
+                        r["npxG"]       = round(r["npxG"] + safe_float(m.get("npxG")),  2)
+                        r["xA"]         = round(r["xA"]   + safe_float(m.get("xA")),    2)
+                        r["shots"]      += safe_int(m.get("shots"))
+                        r["key_passes"] += safe_int(m.get("key_passes"))
+                        r["goals"]      += safe_int(m.get("goals"))
+                        r["assists"]    += safe_int(m.get("assists"))
+                        r["games"]      += 1
 
-        if i < 3:
-            print(f"    → epl_logs={len(epl_logs)}, l6={len(l6)}, l1={len(l1)}")
+    players = list(player_map.values())
 
-        player_rows.append({            "id":     pid,
-            "name":   pname,
-            "team":   team,
-            # Season totals (from league players endpoint)
-            "season": {
-                "xG":        round(float(p.get("xG",  0) or 0), 2),
-                "npxG":      round(float(p.get("npxG", 0) or 0), 2),
-                "xA":        round(float(p.get("xA",  0) or 0), 2),
-                "shots":     int(p.get("shots", 0) or 0),
-                "key_passes": int(p.get("key_passes", 0) or 0),
-                "goals":     int(p.get("goals", 0) or 0),
-                "assists":   int(p.get("assists", 0) or 0),
-                "games":     int(p.get("games", 0) or 0),
-            },
-            # Last 6 GWs
-            "last6": {
-                "xG":         sum_stat(l6, "xG"),
-                "npxG":       sum_stat(l6, "npxG"),
-                "xA":         sum_stat(l6, "xA"),
-                "shots":      int(sum(int(m.get("shots", 0) or 0) for m in l6)),
-                "key_passes": int(sum(int(m.get("key_passes", 0) or 0) for m in l6)),
-                "goals":      int(sum(int(m.get("goals", 0) or 0) for m in l6)),
-                "assists":    int(sum(int(m.get("assists", 0) or 0) for m in l6)),
-                "games":      len(l6),
-            },
-            # Last GW
-            "lastGW": {
-                "xG":         sum_stat(l1, "xG"),
-                "npxG":       sum_stat(l1, "npxG"),
-                "xA":         sum_stat(l1, "xA"),
-                "shots":      int(sum(int(m.get("shots", 0) or 0) for m in l1)),
-                "key_passes": int(sum(int(m.get("key_passes", 0) or 0) for m in l1)),
-                "goals":      int(sum(int(m.get("goals", 0) or 0) for m in l1)),
-                "assists":    int(sum(int(m.get("assists", 0) or 0) for m in l1)),
-                "games":      len(l1),
-            },
-        })
+    # Show top 5 by last 6 xG so we can verify in logs
+    top5 = sorted(players, key=lambda x: x["last6"]["xG"], reverse=True)[:5]
+    print("\n  Top 5 by last 6 xG:")
+    for p in top5:
+        print(f"    {p['name']} ({p['team']}): last6 xG={p['last6']['xG']}, lastGW xG={p['lastGW']['xG']}, games={p['last6']['games']}")
 
-        if (i + 1) % 20 == 0:
-            print(f"  Processed {i+1} players...")
-
-    print(f"  Done — {len(player_rows)} PL players processed")
-    return player_rows
+    print(f"\n  Done — {len(players)} players processed")
+    return players
 
 
 async def upload_to_gist(data: dict):
@@ -219,7 +202,6 @@ async def main():
         # 2. Player stats (last 6 GWs + last GW)
         players = await fetch_player_stats(understat, team_xg)
 
-    # Bundle everything into one JSON
     output = {
         "meta": {
             "updated_at": datetime.now(timezone.utc).isoformat(),
