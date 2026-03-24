@@ -92,18 +92,20 @@ async def fetch_player_stats(understat, team_xg_data):
         # Sort by date ascending so last entries = most recent
         logs.sort(key=lambda m: m.get("date",""))
 
-        # Debug first 2 players — print last 3 match dates and all available keys
-        if i < 2:
-            print(f"  {pname}: {len(logs)} logs total")
-            if logs:
-                print(f"    keys: {list(logs[0].keys())}")
-                print(f"    last 3 dates: {[m.get('date','?')[:10] for m in logs[-3:]]}")
-                print(f"    last match sample: xG={logs[-1].get('xG')} xA={logs[-1].get('xA')} shots={logs[-1].get('shots')}")
+        # Filter to 2025/26 season only (on or after 2025-08-01)
+        # This removes last season's data and other league matches
+        season_logs = [m for m in logs if (m.get("date") or "")[:7] >= "2025-08"]
 
-        # Slice: last 6 matches and last 1 match
-        # This avoids all date-matching issues entirely
-        last6 = logs[-6:] if len(logs) >= 6 else logs
-        last1 = logs[-1:] if logs else []
+        # Debug first 2 players
+        if i < 2:
+            print(f"  {pname}: {len(logs)} total logs → {len(season_logs)} this season")
+            if season_logs:
+                print(f"    last 3 dates: {[m.get('date','?')[:10] for m in season_logs[-3:]]}")
+                print(f"    last match: xG={season_logs[-1].get('xG')} xA={season_logs[-1].get('xA')} shots={season_logs[-1].get('shots')}")
+
+        # Slice last 6 and last 1 from THIS SEASON only
+        last6 = season_logs[-6:] if len(season_logs) >= 6 else season_logs
+        last1 = season_logs[-1:] if season_logs else []
 
         player_rows.append({
             "id":   pid,
