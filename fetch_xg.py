@@ -96,20 +96,32 @@ async def fetch_player_stats(understat, team_xg_data):
     if results:
         print(f"  Date range: {results[0]['datetime'][:10]} → {results[-1]['datetime'][:10]}")
 
-    # Get unique match dates to find last 6 GW dates
-    all_dates = sorted(set(r["datetime"][:10] for r in results))
-    last_gw_date  = all_dates[-1] if all_dates else ""
-    last_6_dates  = set(all_dates[-6:]) if len(all_dates) >= 6 else set(all_dates)
+    # Build per-team match history: team -> list of (match_id, date) sorted by date
+    team_match_history = {}
+    for r in results:
+        date = r["datetime"][:10]
+        for side in ("h", "a"):
+            team_name = r[side]["title"]
+            if team_name in PL_TEAMS:
+                if team_name not in team_match_history:
+                    team_match_history[team_name] = []
+                team_match_history[team_name].append((r["id"], date))
 
-    print(f"  Last GW date : {last_gw_date}")
-    print(f"  Last 6 dates : {sorted(last_6_dates)}")
+    for team in team_match_history:
+        team_match_history[team].sort(key=lambda x: x[1])
 
-    # Get match IDs for last 6 GWs and last GW
-    last6_ids = [r["id"] for r in results if r["datetime"][:10] in last_6_dates]
-    last1_ids = [r["id"] for r in results if r["datetime"][:10] == last_gw_date]
+    # Last 6 match IDs per team and last 1 match ID per team
+    team_last6_ids = {t: set(mid for mid, _ in v[-6:]) for t, v in team_match_history.items()}
+    team_last1_ids = {t: set(mid for mid, _ in v[-1:]) for t, v in team_match_history.items()}
 
-    print(f"  Matches in last 6 GWs: {len(last6_ids)}")
-    print(f"  Matches in last GW:    {len(last1_ids)}")
+    # All unique match IDs we need to fetch (union of all teams' last 6)
+    all_needed_ids = set(mid for ids in team_last6_ids.values() for mid in ids)
+    print(f"  Unique matches to fetch: {len(all_needed_ids)}")
+
+    # Sample output
+    for team in list(team_match_history.keys())[:2]:
+        last6 = [d for _, d in team_match_history[team][-6:]]
+        print(f"  {team} last 6 match dates: {last6}")
 
     # ── Step 3: fetch player stats for each match ─────────────────────────
     # player_buckets[pid][bucket] = accumulated stats dict
