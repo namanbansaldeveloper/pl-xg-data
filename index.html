@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PL 2025/26 — Rolling xG & xGC</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #0e0e12;
+      font-family: 'Inter', 'Segoe UI', sans-serif;
+      color: #fff;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 16px 12px 40px;
+    }
+
+    /* ── Loading / Error screens ── */
+    #screen-loading, #screen-error {
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      min-height: 100vh; gap: 12px; text-align: center; padding: 24px;
+    }
+    #screen-error { display: none; }
+    .spinner circle.track { stroke: #ffffff15; }
+    .spinner circle.arc {
+      stroke: #38bdf8; fill: none; stroke-dasharray: 30 100;
+      stroke-linecap: round; transform-origin: center;
+      animation: spin 1s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .screen-title  { font-size: 16px; font-weight: 600; }
+    .screen-sub    { font-size: 12px; color: #ffffff50; }
+    .progress-bar  { width: 260px; height: 4px; background: #ffffff10; border-radius: 2px; overflow: hidden; margin-top: 4px; }
+    .progress-fill { height: 100%; background: #38bdf8; border-radius: 2px; width: 0%; transition: width .3s; }
+    .err-msg       { color: #f87171; font-size: 13px; max-width: 400px; }
+    .btn-retry     { margin-top: 8px; background: #38bdf8; color: #000; border: none; border-radius: 8px; padding: 10px 24px; cursor: pointer; font-weight: 700; font-size: 13px; }
+
+    /* ── Main app ── */
+    #app { display: none; width: 100%; max-width: 700px; flex-direction: column; align-items: center; gap: 14px; }
+
+    /* Header */
+    .header { width: 100%; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+    .header-left .label { color: #ffffff70; font-size: 11px; letter-spacing: 2px; text-transform: uppercase; margin-bottom: 2px; }
+    .header-left .title { color: #fff; font-size: 13px; font-weight: 600; }
+    .header-right { display: flex; align-items: center; gap: 14px; }
+    .legend { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #ccc; }
+    .btn-refresh { background: #ffffff10; border: 1px solid #ffffff20; color: #fff; border-radius: 6px; padding: 4px 10px; cursor: pointer; font-size: 11px; }
+    .btn-refresh:hover { background: #ffffff20; }
+
+    /* Slide */
+    .slide {
+      width: 100%; border-radius: 16px; padding: 20px 20px 16px;
+      border: 1px solid transparent;
+      transition: opacity .2s, transform .2s;
+    }
+    .slide-top { display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+    .team-name { font-size: 28px; font-weight: 800; letter-spacing: -1px; line-height: 1; }
+    .team-sub  { font-size: 11px; color: #ffffff50; margin-top: 4px; letter-spacing: 1px; text-transform: uppercase; }
+    .stats     { display: flex; gap: 14px; }
+    .stat      { text-align: center; }
+    .stat-val  { font-size: 20px; font-weight: 700; line-height: 1; }
+    .stat-lbl  { font-size: 9px; color: #ffffff40; margin-top: 3px; white-space: nowrap; }
+    .chart-wrap { background: #ffffff06; border-radius: 10px; padding: 12px 8px 4px; }
+    .chart-wrap svg { display: block; width: 100%; }
+    .slide-foot { color: #ffffff35; font-size: 10px; margin-top: 8px; text-align: right; }
+
+    /* Nav */
+    .nav { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; justify-content: center; }
+    .btn-nav { background: #ffffff10; border: 1px solid #ffffff20; color: #fff; border-radius: 8px; padding: 8px 18px; cursor: pointer; font-size: 13px; }
+    .btn-nav:hover { background: #ffffff20; }
+    .team-pills { display: flex; gap: 5px; flex-wrap: wrap; max-width: 380px; justify-content: center; }
+    .pill {
+      width: 30px; height: 30px; border-radius: 6px; font-size: 7px; font-weight: 700;
+      cursor: pointer; border: 1px solid #ffffff15; background: #ffffff12; color: #ffffff60;
+      display: flex; align-items: center; justify-content: center;
+      transition: background .15s, color .15s;
+    }
+    .pill.active { color: #000; border-width: 2px; }
+
+    /* Mini grid */
+    .grid-label { color: #ffffff35; font-size: 10px; text-transform: uppercase; letter-spacing: 1px; align-self: flex-start; }
+    .mini-grid  { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; width: 100%; }
+    .mini-card  { background: #ffffff06; border: 1px solid #ffffff10; border-radius: 8px; cursor: pointer; overflow: hidden; transition: border .2s; }
+    .mini-card:hover { border-color: #ffffff25; }
+    .mini-card svg { display: block; width: 100%; }
+  </style>
+</head>
+<body>
+
+<!-- Loading -->
+<div id="screen-loading">
+  <svg class="spinner" width="48" height="48" viewBox="0 0 48 48">
+    <circle class="track" cx="24" cy="24" r="20" stroke-width="4" fill="none"/>
+    <circle class="arc"   cx="24" cy="24" r="20" stroke-width="4"/>
+  </svg>
+  <div class="screen-title">Fetching live xG data…</div>
+  <div class="screen-sub" id="load-sub">Connecting to Understat via GitHub</div>
+  <div class="progress-bar"><div class="progress-fill" id="progress"></div></div>
+  <div class="screen-sub" id="load-count"></div>
+</div>
+
+<!-- Error -->
+<div id="screen-error">
+  <div style="font-size:32px">⚠️</div>
+  <div class="screen-title" style="color:#f87171">Could not load data</div>
+  <div class="err-msg" id="err-msg"></div>
+  <button class="btn-retry" onclick="init()">Try Again</button>
+</div>
+
+<!-- App -->
+<div id="app">
+  <div class="header">
+    <div class="header-left">
+      <div class="label">Premier League 2025/26</div>
+      <div class="title">Rolling 6-Game xG &amp; xGC · Live via Understat</div>
+    </div>
+    <div class="header-right">
+      <div class="legend">
+        <svg width="24" height="8"><line x1="0" y1="4" x2="24" y2="4" id="legend-xg-line" stroke-width="2.5" stroke-linecap="round"/></svg> xG
+      </div>
+      <div class="legend">
+        <svg width="24" height="8"><line x1="0" y1="4" x2="24" y2="4" stroke="#f97316" stroke-width="2.5" stroke-dasharray="6,3" stroke-linecap="round"/></svg> xGC
+      </div>
+      <button class="btn-refresh" onclick="init()">↻ Refresh</button>
+    </div>
+  </div>
+
+  <div class="slide" id="slide">
+    <div class="slide-top">
+      <div>
+        <div class="team-name" id="s-name"></div>
+        <div class="team-sub"  id="s-sub"></div>
+      </div>
+      <div class="stats" id="s-stats"></div>
+    </div>
+    <div class="chart-wrap"><svg id="main-chart" viewBox="0 0 620 320"></svg></div>
+    <div class="slide-foot">Rolling 6-match window · Source: Understat.com · Auto-updated daily</div>
+  </div>
+
+  <div class="nav">
+    <button class="btn-nav" onclick="go(-1)">← Prev</button>
+    <div class="team-pills" id="pills"></div>
+    <button class="btn-nav" onclick="go(1)">Next →</button>
+  </div>
+
+  <div class="grid-label">All Teams Overview</div>
+  <div class="mini-grid" id="mini-grid"></div>
+</div>
+
+<script>
+// ── CONFIG — PASTE YOUR GIST RAW URL HERE ────────────────────────────────────
+const GIST_URL = "https://gist.githubusercontent.com/namanbansaldeveloper/cd76999ba8ad394d07480f41d5b14840/raw/pl_xg_2025_26.json";
+// ─────────────────────────────────────────────────────────────────────────────
+
+const WINDOW = 6;
+
+const TEAM_META = [
+  { name:"Arsenal",        key:"Arsenal",                  color:"#EF0107", bg:"#1a0505" },
+  { name:"Man City",       key:"Manchester City",           color:"#6CABDD", bg:"#051525" },
+  { name:"Liverpool",      key:"Liverpool",                 color:"#C8102E", bg:"#1a0305" },
+  { name:"Chelsea",        key:"Chelsea",                   color:"#034694", bg:"#020d1e" },
+  { name:"Tottenham",      key:"Tottenham",                 color:"#AAAAAA", bg:"#0a0a0a" },
+  { name:"Aston Villa",    key:"Aston Villa",               color:"#95BFE5", bg:"#04071a" },
+  { name:"Newcastle",      key:"Newcastle United",          color:"#818B8D", bg:"#0a0c10" },
+  { name:"Man United",     key:"Manchester United",         color:"#DA291C", bg:"#1a0403" },
+  { name:"Brighton",       key:"Brighton",                  color:"#0057B8", bg:"#010f24" },
+  { name:"West Ham",       key:"West Ham",                  color:"#7A263A", bg:"#160509" },
+  { name:"Brentford",      key:"Brentford",                 color:"#E30613", bg:"#1a0102" },
+  { name:"Crystal Palace", key:"Crystal Palace",            color:"#C4122E", bg:"#180204" },
+  { name:"Bournemouth",    key:"Bournemouth",               color:"#CC0000", bg:"#1a0403" },
+  { name:"Fulham",         key:"Fulham",                    color:"#CCCCCC", bg:"#0f0f0f" },
+  { name:"Everton",        key:"Everton",                   color:"#003399", bg:"#010820" },
+  { name:"Nottm Forest",   key:"Nottingham Forest",         color:"#DD0000", bg:"#180000" },
+  { name:"Leeds",          key:"Leeds",                     color:"#FFCD00", bg:"#181300" },
+  { name:"Sunderland",     key:"Sunderland",                color:"#EB172B", bg:"#180205" },
+  { name:"Burnley",        key:"Burnley",                   color:"#A57C5B", bg:"#120009" },
+  { name:"Wolves",         key:"Wolverhampton Wanderers",   color:"#FDB913", bg:"#181100" },
+];
+
+let teamData = {};
+let current  = 0;
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function rollingAvg(arr, w) {
+  return arr.map((_, i) => {
+    if (i < w - 1) return null;
+    const s = arr.slice(i - w + 1, i + 1);
+    return +(s.reduce((a, b) => a + b, 0) / w).toFixed(2);
+  });
+}
+
+function show(id) {
+  ["screen-loading","screen-error","app"].forEach(s => {
+    const el = document.getElementById(s);
+    if (s === "app") el.style.display = s === id ? "flex" : "none";
+    else             el.style.display = s === id ? "flex" : "none";
+  });
+}
+
+// ── Data fetch ────────────────────────────────────────────────────────────────
+async function init() {
+  show("screen-loading");
+  document.getElementById("load-count").textContent = "";
+  document.getElementById("progress").style.width = "0%";
+
+  const urls = [
+    GIST_URL + "?t=" + Date.now(),
+    "https://api.allorigins.win/raw?url=" + encodeURIComponent(GIST_URL),
+    "https://corsproxy.io/?url="          + encodeURIComponent(GIST_URL),
+  ];
+
+  for (let i = 0; i < urls.length; i++) {
+    try {
+      document.getElementById("load-sub").textContent   = i === 0 ? "Fetching from GitHub Gist…" : `Trying fallback ${i}…`;
+      document.getElementById("progress").style.width   = `${((i + 1) / urls.length) * 60}%`;
+      const res = await fetch(urls[i]);
+      if (!res.ok) continue;
+      teamData = await res.json();
+      document.getElementById("progress").style.width = "100%";
+      const total = Object.keys(teamData).length;
+      document.getElementById("load-count").textContent = `${total} teams loaded`;
+      setTimeout(() => { buildUI(); show("app"); }, 400);
+      return;
+    } catch(e) { continue; }
+  }
+
+  document.getElementById("err-msg").textContent =
+    "Could not fetch data from GitHub Gist. Check your internet connection or try again later.";
+  show("screen-error");
+}
+
+// ── UI build ─────────────────────────────────────────────────────────────────
+function buildUI() {
+  // Pills
+  const pillsEl = document.getElementById("pills");
+  pillsEl.innerHTML = "";
+  TEAM_META.forEach((t, i) => {
+    const p = document.createElement("button");
+    p.className = "pill" + (i === current ? " active" : "");
+    p.style.background    = i === current ? t.color : "";
+    p.style.borderColor   = i === current ? t.color : "";
+    p.textContent         = t.name.slice(0,3).toUpperCase();
+    p.title               = t.name;
+    p.onclick             = () => jump(i);
+    pillsEl.appendChild(p);
+  });
+
+  // Mini grid
+  const gridEl = document.getElementById("mini-grid");
+  gridEl.innerHTML = "";
+  TEAM_META.forEach((t, i) => {
+    const card = document.createElement("div");
+    card.className = "mini-card";
+    card.id        = `mini-${i}`;
+    if (i === current) { card.style.background = t.bg; card.style.borderColor = t.color + "60"; }
+    card.onclick   = () => jump(i);
+    const matches  = teamData[t.key] || [];
+    card.innerHTML = miniSVG(t, matches);
+    gridEl.appendChild(card);
+  });
+
+  renderSlide();
+}
+
+function renderSlide() {
+  const t       = TEAM_META[current];
+  const matches = teamData[t.key] || [];
+  const rxg     = rollingAvg(matches.map(m => m.xg),  WINDOW);
+  const rxgc    = rollingAvg(matches.map(m => m.xgc), WINDOW);
+  const lastXg  = rxg.filter(v => v !== null).at(-1);
+  const lastXgc = rxgc.filter(v => v !== null).at(-1);
+  const sXg     = matches.length ? (matches.reduce((a,m) => a+m.xg, 0) / matches.length).toFixed(2) : "—";
+  const sXgc    = matches.length ? (matches.reduce((a,m) => a+m.xgc,0) / matches.length).toFixed(2) : "—";
+
+  // Slide styling
+  const slide = document.getElementById("slide");
+  slide.style.background  = `linear-gradient(135deg, ${t.bg} 0%, #0e0e12 100%)`;
+  slide.style.borderColor = t.color + "30";
+
+  document.getElementById("s-name").textContent  = t.name;
+  document.getElementById("s-name").style.color  = t.color;
+  document.getElementById("s-sub").textContent   = `${current+1} of ${TEAM_META.length} · ${matches.length} matches`;
+  document.getElementById("legend-xg-line").setAttribute("stroke", t.color);
+
+  document.getElementById("s-stats").innerHTML = [
+    { label:"Last 6 xG",  val: lastXg  ?? "—", color: t.color },
+    { label:"Last 6 xGC", val: lastXgc ?? "—", color: "#f97316" },
+    { label:"Season xG",  val: sXg,             color: "#ffffff70" },
+    { label:"Season xGC", val: sXgc,            color: "#ffffff70" },
+  ].map(s => `
+    <div class="stat">
+      <div class="stat-val" style="color:${s.color}">${s.val}</div>
+      <div class="stat-lbl">${s.label}</div>
+    </div>`).join("");
+
+  // Main chart
+  document.getElementById("main-chart").innerHTML = mainChartSVG(t, matches, rxg, rxgc);
+
+  // Update pills + mini cards
+  document.querySelectorAll(".pill").forEach((p, i) => {
+    const mt = TEAM_META[i];
+    p.className = "pill" + (i === current ? " active" : "");
+    p.style.background  = i === current ? mt.color : "#ffffff12";
+    p.style.color       = i === current ? "#000"   : "#ffffff60";
+    p.style.borderColor = i === current ? mt.color : "#ffffff15";
+    p.style.borderWidth = i === current ? "2px"    : "1px";
+  });
+
+  document.querySelectorAll(".mini-card").forEach((c, i) => {
+    const mt = TEAM_META[i];
+    c.style.background  = i === current ? mt.bg    : "#ffffff06";
+    c.style.borderColor = i === current ? mt.color + "60" : "#ffffff10";
+  });
+}
+
+// ── Navigation ────────────────────────────────────────────────────────────────
+function go(dir) {
+  current = (current + dir + TEAM_META.length) % TEAM_META.length;
+  animSlide(dir);
+}
+function jump(i) {
+  const dir = i > current ? 1 : -1;
+  current = i;
+  animSlide(dir);
+}
+function animSlide(dir) {
+  const slide = document.getElementById("slide");
+  slide.style.opacity   = "0";
+  slide.style.transform = `translateY(${dir > 0 ? 8 : -8}px)`;
+  setTimeout(() => {
+    renderSlide();
+    slide.style.opacity   = "1";
+    slide.style.transform = "translateY(0)";
+  }, 180);
+}
+
+// ── SVG generators ────────────────────────────────────────────────────────────
+function mainChartSVG(t, matches, rxg, rxgc) {
+  if (matches.length < WINDOW) return `<text x="310" y="160" text-anchor="middle" font-size="13" fill="#555">Not enough matches yet</text>`;
+  const W=620, H=320, p={t:30,r:30,b:50,l:52};
+  const cw=W-p.l-p.r, ch=H-p.t-p.b, gw=matches.length;
+  const vals=[...rxg,...rxgc].filter(v=>v!==null);
+  const minV=Math.floor(Math.min(...vals)*4)/4-0.1;
+  const maxV=Math.ceil( Math.max(...vals)*4)/4+0.2;
+  const sy = v => ch - ((v-minV)/(maxV-minV))*ch;
+  const sx = i => (i/(gw-1))*cw;
+
+  const mkPaths = data => {
+    const pts = data.map((v,i) => v!==null ? [sx(i),sy(v)] : null).filter(Boolean);
+    const line = pts.map((p,i) => `${i===0?'M':'L'}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' ');
+    const area = line + ` L${pts.at(-1)[0].toFixed(1)},${ch} L${pts[0][0].toFixed(1)},${ch} Z`;
+    return { line, area };
+  };
+
+  const xgP  = mkPaths(rxg);
+  const xgcP = mkPaths(rxgc);
+
+  const yTicks = [];
+  for (let v=Math.ceil(minV*4)/4; v<=maxV+0.01; v+=0.25) yTicks.push(+v.toFixed(2));
+
+  const step   = gw<=10?1:gw<=20?2:5;
+  const labels = matches.map((_,i)=>i).filter(i=>i===0||(i+1)%step===0);
+
+  const lastI  = rxg.map((v,i)=>v!==null?i:-1).filter(i=>i>=0).at(-1);
+  const lastIc = rxgc.map((v,i)=>v!==null?i:-1).filter(i=>i>=0).at(-1);
+
+  return `
+    <defs>
+      <linearGradient id="gxg"  x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%"   stop-color="${t.color}" stop-opacity=".25"/>
+        <stop offset="100%" stop-color="${t.color}" stop-opacity=".02"/>
+      </linearGradient>
+      <linearGradient id="gxgc" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%"   stop-color="#f97316" stop-opacity=".2"/>
+        <stop offset="100%" stop-color="#f97316" stop-opacity=".02"/>
+      </linearGradient>
+    </defs>
+    <g transform="translate(${p.l},${p.t})">
+      ${yTicks.map(v => `
+        <line x1="0" y1="${sy(v).toFixed(1)}" x2="${cw}" y2="${sy(v).toFixed(1)}"
+              stroke="#ffffff12" stroke-width="1" ${v%0.5!==0?'stroke-dasharray="3,4"':''}/>
+        ${v%0.5===0?`<text x="-8" y="${(sy(v)+4).toFixed(1)}" text-anchor="end" font-size="10" fill="#888">${v.toFixed(1)}</text>`:''}
+      `).join('')}
+      <line x1="0" y1="0"  x2="0"  y2="${ch}" stroke="#ffffff25" stroke-width="1"/>
+      <line x1="0" y1="${ch}" x2="${cw}" y2="${ch}" stroke="#ffffff25" stroke-width="1"/>
+      <path d="${xgcP.area}" fill="url(#gxgc)"/>
+      <path d="${xgP.area}"  fill="url(#gxg)"/>
+      <path d="${xgcP.line}" fill="none" stroke="#f97316"    stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="7,4"/>
+      <path d="${xgP.line}"  fill="none" stroke="${t.color}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+      ${labels.map(i => `<text x="${sx(i).toFixed(1)}" y="${ch+16}" text-anchor="middle" font-size="9" fill="#666">${matches[i].date.slice(5)}</text>`).join('')}
+      <text x="${cw/2}" y="${ch+34}" text-anchor="middle" font-size="11" fill="#555">Match Date</text>
+      <text x="-34" y="${ch/2}" text-anchor="middle" font-size="11" fill="#666" transform="rotate(-90,-34,${ch/2})">xG</text>
+      <circle cx="${sx(lastI).toFixed(1)}"  cy="${sy(rxg[lastI]).toFixed(1)}"  r="4" fill="${t.color}" stroke="#000" stroke-width="1.5"/>
+      <circle cx="${sx(lastIc).toFixed(1)}" cy="${sy(rxgc[lastIc]).toFixed(1)}" r="4" fill="#f97316"   stroke="#000" stroke-width="1.5"/>
+    </g>`;
+}
+
+function miniSVG(t, matches) {
+  const w=148, h=72, pp={t:16,r:10,b:16,l:6};
+  const cw=w-pp.l-pp.r, ch=h-pp.t-pp.b;
+  if (!matches || matches.length < WINDOW)
+    return `<svg viewBox="0 0 ${w} ${h}"><text x="${w/2}" y="${h/2}" text-anchor="middle" font-size="8" fill="#444">${t.name}</text></svg>`;
+  const rxg  = rollingAvg(matches.map(m=>m.xg),  WINDOW);
+  const rxgc = rollingAvg(matches.map(m=>m.xgc), WINDOW);
+  const gw   = matches.length;
+  const vals = [...rxg,...rxgc].filter(v=>v!==null);
+  const minV = Math.min(...vals)-0.1, maxV=Math.max(...vals)+0.1;
+  const sy   = v => ch-((v-minV)/(maxV-minV))*ch;
+  const sx   = i => (i/(gw-1))*cw;
+  const pd   = data => {
+    const pts = data.map((v,i)=>v!==null?[sx(i),sy(v)]:null).filter(Boolean);
+    return pts.map((p,i)=>`${i===0?'M':'L'}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' ');
+  };
+  return `<svg viewBox="0 0 ${w} ${h}">
+    <g transform="translate(${pp.l},${pp.t})">
+      <line x1="0" y1="${ch}" x2="${cw}" y2="${ch}" stroke="#ffffff15" stroke-width=".5"/>
+      <path d="${pd(rxg)}"  fill="none" stroke="${t.color}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="${pd(rxgc)}" fill="none" stroke="#f97316"    stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="4,2"/>
+      <text x="${cw/2}" y="-4" text-anchor="middle" font-size="8" fill="#bbb" font-weight="600">${t.name}</text>
+    </g>
+  </svg>`;
+}
+
+// ── Keyboard nav ──────────────────────────────────────────────────────────────
+document.addEventListener("keydown", e => {
+  if (e.key === "ArrowLeft")  go(-1);
+  if (e.key === "ArrowRight") go(1);
+});
+
+// ── Boot ──────────────────────────────────────────────────────────────────────
+init();
+</script>
+</body>
+</html>
