@@ -139,9 +139,10 @@ async def fetch_player_stats(understat, team_xg_data):
                 # get_match_players returns {"h": {pid: {...}}, "a": {pid: {...}}}
                 for side in ("h", "a"):
                     side_data = match_players.get(side, {})
-                    for pid, pdata in side_data.items():
-                        pid = str(pid)
-                        if pid not in season_totals:
+                    for roster_id, pdata in side_data.items():
+                        # Key is roster ID — actual player ID is inside pdata
+                        pid = str(pdata.get("player_id", ""))
+                        if not pid or pid not in season_totals:
                             continue
                         if pid not in player_buckets:
                             player_buckets[pid] = {
@@ -150,7 +151,7 @@ async def fetch_player_stats(understat, team_xg_data):
                             }
                         b = player_buckets[pid][bucket_name]
                         b["xG"]         = round(b["xG"]   + safe_float(pdata.get("xG")),   2)
-                        b["npxG"]       = round(b["npxG"] + safe_float(pdata.get("npxG")),  2)
+                        b["npxG"]       = round(b["npxG"] + safe_float(pdata.get("xG")),    2)  # no npxG at match level, use xG
                         b["xA"]         = round(b["xA"]   + safe_float(pdata.get("xA")),    2)
                         b["shots"]      += safe_int(pdata.get("shots"))
                         b["key_passes"] += safe_int(pdata.get("key_passes"))
