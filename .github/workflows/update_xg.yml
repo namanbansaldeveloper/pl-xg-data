@@ -1,0 +1,34 @@
+# .github/workflows/update_xg.yml
+# Runs the xG fetch script automatically every day at 6am UTC
+# and whenever you push to main (useful for testing).
+
+name: Update PL xG Data
+
+on:
+  schedule:
+    - cron: "0 6 * * *"   # every day at 06:00 UTC
+  workflow_dispatch:        # lets you trigger it manually from GitHub UI
+  push:
+    branches: [main]
+
+jobs:
+  fetch-and-upload:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install understat aiohttp
+
+      - name: Run fetch script
+        env:
+          GIST_ID:    ${{ secrets.GIST_ID }}
+          GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
+        run: python fetch_xg.py
