@@ -1,19 +1,16 @@
-# .github/workflows/update_xg.yml
-# Runs the xG fetch script automatically every day at 6am UTC
-# and whenever you push to main (useful for testing).
-
 name: Update PL xG Data
 
 on:
   schedule:
-    - cron: "0 6 * * *"   # every day at 06:00 UTC
-  workflow_dispatch:        # lets you trigger it manually from GitHub UI
+    - cron: "0 6 * * *"
+  workflow_dispatch:
   push:
     branches: [main]
 
 jobs:
   fetch-and-upload:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - name: Checkout repo
@@ -26,10 +23,6 @@ jobs:
 
       - name: Install dependencies
         run: pip install understat aiohttp
-
-      # Player match log fetching can take ~2 min — default timeout is 6h so fine,
-      # but we set an explicit job timeout just in case
-    timeout-minutes: 15
 
       - name: Run fetch script
         env:
