@@ -1,7 +1,4 @@
 # fetch_xg.py v5
-# Uses get_league_results to find match IDs, then get_match_players
-# to aggregate per-player stats for last 6 matches and last GW.
-#
 # Env vars required:
 #   GIST_ID    – ID of your GitHub Gist
 #   GIST_TOKEN – GitHub personal access token with "gist" scope
@@ -60,7 +57,7 @@ async def fetch_player_stats(understat, team_xg_data):
         try: return int(v or 0)
         except: return 0
 
-    # ── Step 1: season totals from league players ──────────────────────────
+    # ── Step 1: season totals ─────────────────────────────────────────────
     all_players = await understat.get_league_players("epl", SEASON)
     season_totals = {}
     for p in all_players:
@@ -79,24 +76,14 @@ async def fetch_player_stats(understat, team_xg_data):
                 "games":      safe_int(p.get("games")),
             }
     print(f"  {len(season_totals)} PL players with season totals")
-    # Debug: print a few IDs so we can compare with match player_id values
-    sample_ids = list(season_totals.items())[:3]
-    for pid, s in sample_ids:
-        print(f"  season_totals sample — id: {pid}, name: {s['name']}")
 
-    # ── Step 2: get all league results to find match IDs + dates ──────────
-    print("  Fetching all league results for match IDs...")
-    results = await understat.get_league_results("epl", SEASON)
-
-    # Sort by date, keep only played matches
-    results = [r for r in results if r.get("isResult")]
+    # ── Step 2: get all league results ────────────────────────────────────
+    print("  Fetching league results...")
+    results = [r for r in await understat.get_league_results("epl", SEASON) if r.get("isResult")]
     results.sort(key=lambda r: r.get("datetime", ""))
+    print(f"  {len(results)} completed matches")
 
-    print(f"  {len(results)} completed matches found")
-    if results:
-        print(f"  Date range: {results[0]['datetime'][:10]} → {results[-1]['datetime'][:10]}")
-
-    # Build per-team match history: team -> list of (match_id, date) sorted by date
+    # ── Step 3: build per-team match history ──────────────────────────────
     team_match_history = {}
     for r in results:
         date = r["datetime"][:10]
@@ -110,86 +97,73 @@ async def fetch_player_stats(understat, team_xg_data):
     for team in team_match_history:
         team_match_history[team].sort(key=lambda x: x[1])
 
-    # Last 6 match IDs per team and last 1 match ID per team
-    team_last6_ids = {t: set(mid for mid, _ in v[-6:]) for t, v in team_match_history.items()}
-    team_last1_ids = {t: set(mid for mid, _ in v[-1:]) for t, v in team_match_history.items()}
+    # Last 6 and last 1 match IDs per team
+    team_last6_ids = {t: [mid for mid, _ in v[-6:]] for t, v in team_match_history.items()}
+    team_last1_ids = {t: [mid for mid, _ in v[-1:]] for t, v in team_match_history.items()}
 
-    # All unique match IDs we need to fetch (union of all teams' last 6)
-    all_needed_ids = set(mid for ids in team_last6_ids.values() for mid in ids)
+    # All unique match IDs we need across all teams' last 6
+    all_needed_ids = list(set(mid for ids in team_last6_ids.values() for mid in ids))
     print(f"  Unique matches to fetch: {len(all_needed_ids)}")
 
-    # Sample output
     for team in list(team_match_history.keys())[:2]:
-        last6 = [d for _, d in team_match_history[team][-6:]]
-        print(f"  {team} last 6 match dates: {last6}")
+        last6_dates = [d for _, d in team_match_history[team][-6:]]
+        print(f"  {team} last 6 dates: {last6_dates}")
 
-    # ── Step 3: fetch player stats for each match ─────────────────────────
-    # player_buckets[pid][bucket] = accumulated stats dict
-    player_buckets = {}  # pid -> {"last6": {...}, "lastGW": {...}}
+    # ── Step 4: fetch player data for all needed matches ──────────────────
+    match_player_data = {}  # match_id -> {player_id -> pdata}
 
-    debug_done = False
-    async def process_matches(match_ids, bucket_name):
-        nonlocal debug_done
-        print(f"  Fetching player data for {len(match_ids)} matches ({bucket_name})...")
+    print(f"  Fetching player data for {len(all_needed_ids)} matches...")
+    for i, mid in enumerate(all_needed_ids):
+        try:
+            match_players = await understat.get_match_players(mid)
+            match_player_data[mid] = {}
+            for side in ("h", "a"):
+                for _, pdata in match_players.get(side, {}).items():
+                    pid = str(pdata.get("player_id", ""))
+                    if pid:
+                        match_player_data[mid][pid] = pdata
+        except Exception as e:
+            print(f"    ⚠ match {mid} failed: {e}")
+        if (i + 1) % 20 == 0:
+            print(f"    {i+1}/{len(all_needed_ids)} fetched...")
+
+    print("  Done fetching match data")
+
+    # ── Step 5: aggregate per player ─────────────────────────────────────
+    def agg(match_ids, pid):
+        """Sum stats across match_ids. games = number of team matches in window."""
+        result = {
+            "xG": 0.0, "npxG": 0.0, "xA": 0.0,
+            "shots": 0, "key_passes": 0,
+            "goals": 0, "assists": 0,
+            "games": len(match_ids),
+        }
         for mid in match_ids:
-            try:
-                match_players = await understat.get_match_players(mid)
-                # Debug: print raw structure of first match only
-                if not debug_done:
-                    debug_done = True
-                    print(f"\n  DEBUG match {mid} top-level keys: {list(match_players.keys())}")
-                    for side in list(match_players.keys())[:1]:
-                        side_data = match_players[side]
-                        for roster_id, pdata in list(side_data.items())[:3]:
-                            print(f"  DEBUG roster_key={roster_id}, player_id={pdata.get('player_id')}, name={pdata.get('player')}, xG={pdata.get('xG')}")
-                    print()
-                # get_match_players returns {"h": {pid: {...}}, "a": {pid: {...}}}
-                for side in ("h", "a"):
-                    side_data = match_players.get(side, {})
-                    for roster_id, pdata in side_data.items():
-                        # Key is roster ID — actual player ID is inside pdata
-                        pid = str(pdata.get("player_id", ""))
-                        if not pid or pid not in season_totals:
-                            continue
-                        if pid not in player_buckets:
-                            player_buckets[pid] = {
-                                "last6":  {"xG":0.0,"npxG":0.0,"xA":0.0,"shots":0,"key_passes":0,"goals":0,"assists":0,"games":0},
-                                "lastGW": {"xG":0.0,"npxG":0.0,"xA":0.0,"shots":0,"key_passes":0,"goals":0,"assists":0,"games":0},
-                            }
-                        b = player_buckets[pid][bucket_name]
-                        b["xG"]         = round(b["xG"]   + safe_float(pdata.get("xG")),   2)
-                        b["npxG"]       = round(b["npxG"] + safe_float(pdata.get("xG")),    2)  # no npxG at match level, use xG
-                        b["xA"]         = round(b["xA"]   + safe_float(pdata.get("xA")),    2)
-                        b["shots"]      += safe_int(pdata.get("shots"))
-                        b["key_passes"] += safe_int(pdata.get("key_passes"))
-                        b["goals"]      += safe_int(pdata.get("goals"))
-                        b["assists"]    += safe_int(pdata.get("assists"))
-                        b["games"]      += 1
-            except Exception as e:
-                print(f"    ⚠ match {mid} failed: {e}")
+            pdata = match_player_data.get(mid, {}).get(pid)
+            if pdata:
+                result["xG"]         = round(result["xG"] + safe_float(pdata.get("xG")), 2)
+                result["npxG"]       = round(result["npxG"] + safe_float(pdata.get("xG")), 2)
+                result["xA"]         = round(result["xA"] + safe_float(pdata.get("xA")), 2)
+                result["shots"]      += safe_int(pdata.get("shots"))
+                result["key_passes"] += safe_int(pdata.get("key_passes"))
+                result["goals"]      += safe_int(pdata.get("goals"))
+                result["assists"]    += safe_int(pdata.get("assists"))
+        return result
 
-    # Fetch last 6 first (includes last GW matches)
-    await process_matches(last6_ids, "last6")
-    # Fetch last GW separately
-    await process_matches(last1_ids, "lastGW")
-
-    # ── Step 4: build final player rows ───────────────────────────────────
     player_rows = []
     for pid, s in season_totals.items():
-        buckets = player_buckets.get(pid, {
-            "last6":  {"xG":0.0,"npxG":0.0,"xA":0.0,"shots":0,"key_passes":0,"goals":0,"assists":0,"games":0},
-            "lastGW": {"xG":0.0,"npxG":0.0,"xA":0.0,"shots":0,"key_passes":0,"goals":0,"assists":0,"games":0},
-        })
+        team = s["team"]
+        l6_ids = team_last6_ids.get(team, [])
+        l1_ids = team_last1_ids.get(team, [])
         player_rows.append({
             "id":     pid,
             "name":   s["name"],
-            "team":   s["team"],
+            "team":   team,
             "season": {k: s[k] for k in ("xG","npxG","xA","shots","key_passes","goals","assists","games")},
-            "last6":  buckets["last6"],
-            "lastGW": buckets["lastGW"],
+            "last6":  agg(l6_ids, pid),
+            "lastGW": agg(l1_ids, pid),
         })
 
-    # Show top 5 by last 6 xG
     top5 = sorted(player_rows, key=lambda x: x["last6"]["xG"], reverse=True)[:5]
     print("\n  Top 5 by last 6 xG:")
     for p in top5:
@@ -208,7 +182,10 @@ async def upload_to_gist(data: dict):
     }
     headers = {"Authorization": f"token {gist_token}", "Accept": "application/vnd.github+json"}
     async with aiohttp.ClientSession() as session:
-        async with session.patch(f"https://api.github.com/gists/{gist_id}", json=payload, headers=headers) as resp:
+        async with session.patch(
+            f"https://api.github.com/gists/{gist_id}",
+            json=payload, headers=headers
+        ) as resp:
             if resp.status == 200:
                 print(f"\n✅ Gist updated successfully!")
             else:
@@ -224,7 +201,10 @@ async def main():
         players  = await fetch_player_stats(understat, team_xg)
 
     output = {
-        "meta": {"updated_at": datetime.now(timezone.utc).isoformat(), "season": f"{SEASON}/{int(SEASON)+1}"},
+        "meta": {
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "season": f"{SEASON}/{int(SEASON)+1}",
+        },
         "teams":   team_xg,
         "players": players,
     }
