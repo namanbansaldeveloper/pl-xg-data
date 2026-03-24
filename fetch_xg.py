@@ -65,20 +65,25 @@ async def fetch_player_stats(understat, team_xg_data):
     players = await understat.get_league_players("epl", SEASON)
     print(f"  {len(players)} players found")
 
-    # Build a list of all unique match dates across all teams to determine GW order
+    # Build a sorted list of all unique match dates across all teams
     all_dates = sorted(set(
         m["date"]
         for matches in team_xg_data.values()
         for m in matches
     ))
 
-    # Last GW = most recent match date
+    # Last GW = most recent date
     last_gw_date = all_dates[-1] if all_dates else None
-    # Last 6 GWs = last 6 unique match dates
-    last_6_dates  = set(all_dates[-6:])  if len(all_dates) >= 6 else set(all_dates)
+    # Last 6 GWs = last 6 unique dates
+    last_6_dates = set(all_dates[-6:]) if len(all_dates) >= 6 else set(all_dates)
 
-    print(f"  Last GW date : {last_gw_date}")
-    print(f"  Last 6 dates : {sorted(last_6_dates)}")
+    # Also compute cutoff timestamps for fuzzy matching
+    # (player logs use full datetime strings, not just dates)
+    last_gw_cutoff = last_gw_date  # players within this date string
+    last_6_cutoff  = min(last_6_dates) if last_6_dates else last_gw_date
+
+    print(f"  Last GW date  : {last_gw_date}")
+    print(f"  Last 6 cutoff : {last_6_cutoff} → {last_gw_date}")
 
     print("\nFetching per-player match logs (this takes ~1-2 min)...")
     player_rows = []
@@ -104,13 +109,21 @@ async def fetch_player_stats(understat, team_xg_data):
         def sum_stat(log_list, stat):
             return round(sum(float(m.get(stat, 0) or 0) for m in log_list), 2)
 
-        # Last 6 GWs
-        l6 = [m for m in epl_logs if m["date"][:10] in last_6_dates]
-        # Last GW only
-        l1 = [m for m in epl_logs if m["date"][:10] == last_gw_date]
+        # Use date string prefix for matching (handles timezone differences)
+        # Player log dates look like "2025-11-02 15:00:00" — we take first 10 chars
+        def log_date(m):
+            return (m.get("date") or "")[:10]
 
-        player_rows.append({
-            "id":     pid,
+        # Last 6 GWs: any match on or after the earliest of the last 6 GW dates
+        l6 = [m for m in epl_logs if last_6_cutoff <= log_date(m) <= last_gw_date]
+        # Last GW: any match on the last GW date
+        l1 = [m for m in epl_logs if log_date(m) == last_gw_date]
+
+        # Debug first few players so we can verify in Actions log
+        if i < 3:
+            print(f"  {pname}: {len(epl_logs)} EPL logs, l6={len(l6)}, l1={len(l1)}")
+
+        player_rows.append({            "id":     pid,
             "name":   pname,
             "team":   team,
             # Season totals (from league players endpoint)
