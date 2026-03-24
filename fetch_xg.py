@@ -1,67 +1,96 @@
-async def fetch_player_stats(understat, team_xg_data):
-    print("\nStarting Player Data Fetch...")
-    players = await understat.get_league_players("epl", SEASON)
+import asyncio
+import json
+import aiohttp
+from understat import Understat
+
+# --- CONFIGURATION ---
+SEASON = "2025"  # Understat uses the start year (2025-26 season)
+PL_TEAMS = [
+    "Arsenal", "Aston Villa", "Bournemouth", "Brentford", "Brighton",
+    "Chelsea", "Crystal Palace", "Everton", "Fulham", "Ipswich",
+    "Leicester", "Liverpool", "Manchester City", "Manchester United",
+    "Newcastle United", "Nottingham Forest", "Southampton", "Tottenham",
+    "West Ham", "Wolverhampton Wanderers"
+]
+
+async def fetch_player_stats(understat):
+    print(f"Pulling PL Player Data for {SEASON}/26...")
+    
+    # 1. Get the high-level summary for all players in the league
+    all_players = await understat.get_league_players("epl", SEASON)
     player_rows = []
 
-    for i, p in enumerate(players):
-        pid, pname, team = p["id"], p["player_name"], p["team_title"]
-        if team not in PL_TEAMS: continue
+    # Process players (limit to top performers to keep JSON manageable)
+    # Sorting by xG so we get the most relevant players first
+    sorted_players = sorted(all_players, key=lambda x: float(x.get("xG", 0)), reverse=True)
 
-        try:
-            # TRY THIS: Remove the season filter from the API call and filter manually
-            logs = await understat.get_player_matches(pid) 
-        except Exception as e:
+    for i, p in enumerate(sorted_players[:150]):  # Top 150 players for the slide deck
+        pid = p["id"]
+        pname = p["player_name"]
+        team = p["team_title"]
+
+        if team not in PL_TEAMS:
             continue
 
-        # --- DEBUG SECTION: RUNS ONLY FOR THE FIRST 2 PLAYERS ---
-        if i < 2:
-            print(f"\nDEBUG for {pname}:")
-            if not logs:
-                print("  ❌ API returned ZERO logs for this player.")
-            else:
-                print(f"  ✅ API returned {len(logs)} total logs.")
-                print(f"  Sample Log Keys: {list(logs[0].keys())}")
-                print(f"  Sample Season Value: '{logs[0].get('season')}'")
-                print(f"  Sample League Value: '{logs[0].get('league')}'")
-        # -------------------------------------------------------
+        try:
+            # 2. Fetch ALL match logs for this specific player
+            # We don't pass 'season' here to avoid API-side filtering bugs
+            logs = await understat.get_player_matches(pid)
+        except Exception as e:
+            print(f"  ⚠ Skip {pname}: {e}")
+            continue
 
-        # NEW FILTER: More aggressive matching
-        # We look for "2025" in the season and "epl" in the league (case-insensitive)
+        # 3. Manual Filter: Only matches from the current season and PL teams
+        # Match logs usually have 'h_team'/'a_team' and a 'date'
         epl_logs = []
         for m in logs:
-            m_season = str(m.get("season", ""))
-            m_league = str(m.get("league", "")).lower()
+            match_date = m.get("date", "")
+            # Matches in the 2025/26 season happen in 2025 or 2026
+            is_current_season = "2025-" in match_date or "2026-" in match_date
             
-            if "2025" in m_season and ("epl" in m_league or "premier" in m_league):
+            # Ensure it's a Premier League match (checking team names)
+            is_pl = m.get("h_team") in PL_TEAMS or m.get("a_team") in PL_TEAMS
+            
+            if is_current_season and is_pl:
                 epl_logs.append(m)
 
+        # 4. Sort by date (Newest first) and Slice
         epl_logs.sort(key=lambda x: x["date"], reverse=True)
-        l1, l6 = epl_logs[:1], epl_logs[:6]
-
-        # Check if we actually found anything
-        if i < 2:
-            print(f"  Filtered EPL Logs for 2025: {len(epl_logs)}")
+        l1 = epl_logs[:1]   # Last Gameweek
+        l6 = epl_logs[:6]   # Last 6 Gameweeks
 
         def sum_stat(log_list, stat):
             return round(sum(float(m.get(stat, 0) or 0) for m in log_list), 2)
 
         player_rows.append({
-            "id": pid, "name": pname, "team": team,
-            "season": {
-                "xG": round(float(p.get("xG", 0) or 0), 2),
-                "npxG": round(float(p.get("npxG", 0) or 0), 2),
-                "xA": round(float(p.get("xA", 0) or 0), 2),
-                "games": int(p.get("games", 0) or 0),
+            "id": pid,
+            "name": pname,
+            "team": team,
+            "season_summary": {
+                "xG": round(float(p.get("xG", 0)), 2),
+                "xA": round(float(p.get("xA", 0)), 2),
+                "goals": int(p.get("goals", 0)),
+                "assists": int(p.get("assists", 0)),
+                "games": int(p.get("games", 0))
             },
-            "last6": {
-                "xG": sum_stat(l6, "xG"),
-                "xA": sum_stat(l6, "xA"),
-                "games": len(l6),
+            "recent_form": {
+                "last_6_xG": sum_stat(l6, "xG"),
+                "last_6_xA": sum_stat(l6, "xA"),
+                "last_6_goals": int(sum(int(m.get("goals", 0)) for m in l6)),
+                "match_count": len(l6)
             },
-            "lastGW": {
+            "last_gw": {
                 "xG": sum_stat(l1, "xG"),
                 "xA": sum_stat(l1, "xA"),
-                "games": len(l1),
+                "goals": int(sum(int(m.get("goals", 0)) for m in l1)),
+                "date": l1[0]["date"] if l1 else "N/A"
             }
         })
+
+        if (i + 1) % 25 == 0:
+            print(f"  Processed {i+1} players...")
+
     return player_rows
+
+async def main():
+    async with aiohttp.ClientSession() as session:
